@@ -1,0 +1,10 @@
+{
+  "org": "{org}",
+  "site": "{site}",
+  "confMap": {
+    "/us/p/{{urlkey}}": {
+      "storeViewCode": "default",
+      "storeCode": "main_website_store"
+    }
+  }
+}
