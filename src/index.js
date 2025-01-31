@@ -90,7 +90,7 @@ const seedAllProducts = async () => {
 
   const siteConfig = JSON.parse(fs.readFileSync('site-config.json', 'utf8'));
 
-  while (currentPage <= totalPages && currentPage <= 3) {
+  while (currentPage <= totalPages) {
     console.log(`Fetching page ${currentPage} of ${totalPages}...`);
 
     const productsData = await fetchProductBatch(BATCH_SIZE, currentPage);
