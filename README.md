@@ -13,7 +13,7 @@ npm run seed
 
 List all products
 ```bash
-npm run seedlist
+npm run seed list
 ```
 
 ## Configuration
