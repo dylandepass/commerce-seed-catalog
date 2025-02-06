@@ -12,20 +12,20 @@
 import fs from 'fs';
 import fetchProductsCore from './queries/core.js';
 import fetchProductsLiveSearch from './queries/live-search.js';
-import { fetchCatalogProduct } from './queries/catalog.js';
-import { callPreviewPublish } from './utils/admin.js';
+import {
+  createBulkJob, getPreviewPublishPaths,
+} from './utils/admin.js';
 
 const USE_LIVE_SEARCH = true;
-const BATCH_SIZE = 5;
-const DELAY_MS = 2000;
 const SHOULD_PUBLISH = true;
 
-// Utility function to pause execution for given milliseconds
-// eslint-disable-next-line no-promise-executor-return
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Function to fetch a single batch of products
-const fetchProductBatch = async (pageSize, currentPage) => {
+/**
+ * Fetches a batch of products from the API.
+ * @param {number} pageSize The number of products to fetch per page.
+ * @param {number} currentPage The current page number.
+ * @returns {Promise<Object>} The products data.
+ */
+async function fetchProductBatch(pageSize, currentPage) {
   try {
     const response = USE_LIVE_SEARCH ? await fetchProductsLiveSearch(pageSize, currentPage) : await fetchProductsCore(pageSize, currentPage);
 
@@ -57,9 +57,22 @@ const fetchProductBatch = async (pageSize, currentPage) => {
     console.error(`Error fetching page ${currentPage}:`, error.message);
     return null;
   }
-};
+}
 
-const listAllProducts = async () => {
+/**
+ * Writes the results to a file.
+ * @param {Object} results The results to write to the file.
+ * @param {string} fileName The name of the file to write the results to.
+ */
+function writeResults(results, fileName) {
+  fs.writeFileSync(fileName, JSON.stringify(results, null, 2), 'utf8');
+}
+
+/**
+ * Lists all products.
+ * @returns {Promise<Object>} The products data.
+ */
+async function listAllProducts(startTime) {
   const results = [];
   let currentPage = 1;
   let totalPages = 2;
@@ -74,83 +87,51 @@ const listAllProducts = async () => {
     currentPage += 1;
   }
 
-  fs.writeFileSync('all-products.json', JSON.stringify(results, null, 2), 'utf8');
+  writeResults(results, `all-products-${startTime}.json`);
+
   console.log('Data successfully written to output.txt');
-};
+  return results;
+}
 
-const seedAllProducts = async () => {
-  const results = [];
-  const previewErrors = [];
-  const catalogErrors = [];
+/**
+ * Seeds all products.
+ */
+async function seedAllProducts() {
+  if (!process.env.HELIX_ADMIN_API_KEY) {
+    console.error('HELIX_ADMIN_API_KEY is not set');
+    return;
+  }
+
   const startTime = Date.now();
-  const allPromises = [];
-
-  let currentPage = 1;
-  let totalPages = 2;
 
   const siteConfig = JSON.parse(fs.readFileSync('site-config.json', 'utf8'));
 
-  while (currentPage <= totalPages && currentPage <= 3) {
-    console.log(`Fetching page ${currentPage} of ${totalPages}...`);
+  const allProducts = await listAllProducts(startTime);
+  const productList = allProducts.map((product) => getPreviewPublishPaths(siteConfig, product.sku, product.urlKey)[0])
+    .filter((path) => path !== undefined && path.startsWith('/'));
 
-    const productsData = await fetchProductBatch(BATCH_SIZE, currentPage);
+  const previewJob = await createBulkJob(siteConfig, 'preview', productList);
 
-    if (!productsData) {
-      console.error('Failed to fetch data. Exiting.');
-      break;
-    }
+  writeResults(previewJob, `bulk-preview-result-${startTime}.json`);
 
-    // Process the fetched products
-    const batchRequests = [];
-    const products = productsData.items;
-    for (const product of products) {
-      try {
-        console.log(`Fetching product ${product.sku}...`);
-
-        // Make sure the product exists in the catalog before calling preview/publish
-        await fetchCatalogProduct(product.sku);
-        console.log(`Publishing product ${product.sku}...`);
-
-        batchRequests.push(callPreviewPublish(siteConfig, 'POST', product.sku, product.url_key || product.urlKey, SHOULD_PUBLISH));
-      } catch (error) {
-        console.log('catalog error', error.message);
-        catalogErrors.push({
-          error: error.message,
-          product,
-        });
-        console.error(`Error fetching product ${product.sku}:`);
-      }
-    }
-
-    allPromises.push(...batchRequests);
-
-    Promise.allSettled(batchRequests).then((batchResults) => {
-      for (const [index, result] of batchResults.entries()) {
-        if (result.status === 'fulfilled') {
-          results.push({
-            ...result.value,
-          });
-        } else {
-          console.log('preview error', result.reason.message);
-          previewErrors.push({
-            reason: result.reason.message,
-            product: products[index],
-          });
-        }
-      }
-    });
-
-    // Update pagination info
-    totalPages = productsData.page_info.total_pages;
-    currentPage += 1;
-
-    if (currentPage <= totalPages) {
-      console.log(`Waiting for ${DELAY_MS / 1000} seconds before next batch...\n`);
-      await delay(DELAY_MS);
-    }
+  const failedPreviews = previewJob.data.resources.filter((result) => result.status !== 200);
+  if (failedPreviews.length > 0) {
+    writeResults(failedPreviews, `bulk-preview-failed-${startTime}.json`);
+    writeResults(failedPreviews.map((result) => result.path), `bulk-preview-failed-list-${startTime}.json`);
   }
 
-  await Promise.allSettled(allPromises);
+  if (SHOULD_PUBLISH) {
+    const successfulPreviewPaths = previewJob.data.resources.filter((result) => result.status === 200).map((result) => result.path);
+    const liveJob = await createBulkJob(siteConfig, 'live', successfulPreviewPaths);
+
+    writeResults(liveJob, `bulk-publish-result-${startTime}.json`);
+
+    const failedPublishes = liveJob.data.resources.filter((result) => result.status !== 200);
+    if (failedPublishes.length > 0) {
+      writeResults(failedPublishes, `bulk-publish-failed-${startTime}.json`);
+      writeResults(failedPublishes.map((result) => result.path), `bulk-publish-failed-list-${startTime}.json`);
+    }
+  }
 
   const endTime = Date.now();
   const elapsedTime = endTime - startTime; // milliseconds
@@ -159,24 +140,7 @@ const seedAllProducts = async () => {
   const seconds = Math.floor((elapsedTime % 60000) / 1000);
 
   console.log(`Execution time: ${minutes} minute(s) and ${seconds} second(s).`);
-
-  try {
-    fs.writeFileSync(`output-${endTime}.json`, JSON.stringify(results, null, 2), 'utf8');
-    console.log('Data successfully written to output.txt');
-
-    if (previewErrors.length > 0) {
-      fs.writeFileSync(`preview-errors-${endTime}.json`, JSON.stringify(previewErrors, null, 2), 'utf8');
-      console.log('Errors successfully written to errors.txt');
-    }
-
-    if (catalogErrors.length > 0) {
-      fs.writeFileSync(`catalog-errors-${endTime}.json`, JSON.stringify(catalogErrors, null, 2), 'utf8');
-      console.log('Not found successfully written to not-found.txt');
-    }
-  } catch (err) {
-    console.error('An error occurred while writing to the file:', err);
-  }
-};
+}
 
 const arg = process.argv[2];
 

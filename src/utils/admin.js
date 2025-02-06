@@ -122,6 +122,64 @@ export function getPreviewPublishPaths(config, sku, urlKey) {
 }
 
 /**
+ * Polls a bulk job for completion.
+ * @param {Config} config The config object
+ * @param {string} jobName The name of the job to poll
+ * @returns {Promise<Object>} The job results
+ */
+export async function pollBulkJob(config, api, jobName) {
+  let resp;
+  let done = false;
+
+  while (!done) {
+    const response = await callAdmin(config, 'job', `/${api}/${jobName}/details`, {
+      method: 'GET',
+      headers: {
+        authorization: `token ${process.env.HELIX_ADMIN_API_KEY}`,
+      },
+    });
+    resp = await response.json();
+    if (resp.state === 'stopped') {
+      done = true;
+    }
+
+    // eslint-disable-next-line no-promise-executor-return
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  return resp;
+}
+
+/**
+ * Creates a bulk job for the given paths.
+ * @param {Config} config The config object
+ * @param {string} api The API endpoint to call (e.g., preview, live)
+ * @param {string[]} paths The paths to create the bulk job for
+ * @returns {Promise<string>} The name of the created bulk job
+ */
+export async function createBulkJob(config, api, paths) {
+  const response = await callAdmin(config, api, '/*', {
+    method: 'POST',
+    body: {
+      forceUpdate: true,
+      paths,
+    },
+    headers: {
+      authorization: `token ${process.env.HELIX_ADMIN_API_KEY}`,
+    },
+  });
+  try {
+    const body = await response.json();
+    const jobName = body.job.name;
+
+    const jobResults = await pollBulkJob(config, api === 'live' ? 'publish' : api, jobName);
+    return jobResults;
+  } catch (err) {
+    throw new Error(`Bulk job failed: ${err}`);
+  }
+}
+
+/**
  * Calls the Admin API to publish a product to the preview and live environments.
  * @param {Config} config The config object
  * @param {string} method The method to use (e.g., POST or DELETE)

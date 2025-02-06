@@ -8,9 +8,9 @@ lerna-debug.log*
 .pnpm-debug.log*
 .env
 output-*.json
-preview-errors-*.json
-catalog-errors-*.json
-all-products.json
+bulk-preview-*.json
+bulk-publish-*.json
+all-products-*.json
 site-config.json
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
